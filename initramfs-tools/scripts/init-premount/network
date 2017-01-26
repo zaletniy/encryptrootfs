@@ -1,0 +1,36 @@
+#!/bin/sh
+set -ex
+
+PREREQ=""
+prereqs()
+{
+   echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+   prereqs
+   exit 0
+   ;;
+esac
+
+. /scripts/functions
+. /etc/encryptrootfs.conf
+if [ ! -x "/bin/encryptrootfs_network_impl.sh" ]; then
+   panic "Network configuration implementation not found"
+fi
+
+# For DHCP
+modprobe af_packet
+wait_for_udev 10
+
+log_begin_msg "Configuring networking"
+/bin/encryptrootfs_network_impl.sh
+rc=$?
+if [ $rc -gt 0 ]; then
+    log_failure_msg "Error during network configuration. Please see log above"
+    sleep "$pause_on_error"
+    exit 1
+fi
+log_end_msg "Network configuration finished."
+exit 0

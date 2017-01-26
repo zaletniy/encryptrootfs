@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+file_marker=/etc/encryptrootfs-initramfs
+
+. /etc/initramfs-tools/conf.d/encryptrootfs.conf
+
+
+_check_errors(){
+   if [ $? -gt 0 ]
+   then
+        echo "Error during $1. Returned code is not 0 but '$?'"
+        exit 1
+   fi
+}
+
+_update_grub_config(){
+  #avoiding lookup rootfs partition by UUID
+  sed -i '/GRUB_DISABLE_LINUX_UUID/d' /etc/default/grub
+  echo "GRUB_DISABLE_LINUX_UUID=\"true\"" >> /etc/default/grub
+
+  #avoiding device autodetection by GRUB
+  sed -i '/GRUB_DEVICE/d' /etc/default/grub
+  echo "GRUB_DEVICE=\"/dev/${disk}\"" >> /etc/default/grub
+
+
+  #generating new grub config
+  update-grub
+  _check_errors "generating new grub config"
+}
+
+_install_grub(){
+    grub-install /dev/"$disk"
+    _check_errors "installing grub to ${disk}"
+}
+
+_mount_boot(){
+    #adding new mount point for boot partition
+    mkdir /boot
+    echo "LABEL=${boot_partition_label}    /boot  ${boot_partition_file_system}    defaults        1 1" >> /etc/fstab
+
+    mount -a
+    _check_errors "mounting boot device"
+}
+
+
+if [ -f $file_marker ]
+then
+    echo "File-marker $file_marker found. Performing final modifications."
+    set -x
+
+    [ -z "${boot_partition_label}" ] && boot_partition_label="boot"
+    [ -z "${boot_partition_file_system}" ] && boot_partition_file_system="ext3"
+
+    mv /boot/ /boot_
+    _mount_boot
+
+    #copying data
+    cp -a /boot_/* /boot/
+    rm -rf /boot_/
+
+    _update_grub_config
+    _install_grub
+
+    rm -rf $file_marker
+    _check_errors "removing file-marker $file_marker"
+    set +x
+else
+    echo "No file-marker  '$file_marker' found. Assuming that all final actions were performed previously."
+fi

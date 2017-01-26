@@ -1,0 +1,210 @@
+#!/bin/sh
+set -e
+
+PREREQ=""
+INSTALL_PATH="/usr/share/lib/encryptrootfs"
+
+prereqs(){
+   echo "$PREREQ"
+}
+
+log(){
+    if [ "${verbose}" = "y" ]; then
+        echo "$1"
+    fi
+}
+
+warn(){
+    echo "W: ${1}" >&2
+}
+
+fatal(){
+    echo "$1"
+    echo "F: ${1}" >&2
+    exit 1
+}
+
+install_dependencies(){
+    dependencies=$1
+    for dep in $dependencies; do
+        if [ ! -f "$(which "$dep")" ];then
+            fatal "No dependency found ${dep}. which $(which "$dep")"
+        fi
+        copy_exec "$(which "$dep")"
+    done
+}
+
+install_kernel_modules(){
+    #cryptsetup kernel module dependencies
+    for mod in dm_mod dm_crypt aes cbc chainiv cryptomgr krng sha256 xts; do
+      manual_add_modules $mod
+    done
+}
+
+lookup_implementation(){
+    path=$1
+    moddir=$2
+    impl_path=""
+    if [  -e "$path" ]
+    then
+        impl_path=$path
+    else
+        if [  -e "$INSTALL_PATH/$path" ]
+        then
+            impl_path="$INSTALL_PATH/$path"
+        else
+            fatal "Implementation was not found by path $path as well as in module directory $moddir"
+        fi
+    fi
+    echo "$impl_path"
+}
+
+generate_config(){
+    tmpDir=$(mktemp -d --tmpdir encryptrootfs.XXXX)
+    #using non standard home directory for root to avoid conflict
+    #with default rootfs path mounting
+    dropbearAcl="${DESTDIR}/home/root/.ssh/authorized_keys"
+    mkdir -p "${DESTDIR}/home/root/.ssh"
+    log "Saving public ssh-rsa key to $dropbearAcl"
+    echo "${dropbear_acl}" > "$dropbearAcl"
+
+    #preparing root user
+    echo "root:x:0:0:root:/home/root:/bin/sh" > "${DESTDIR}/etc/passwd"
+    echo "passwd: compat" > "${DESTDIR}/etc/nsswitch.conf"
+    LIBC_DIR=$(ldd /usr/sbin/dropbear | sed -n -e 's,.* => \(/lib.*\)/libc\.so\..*,\1,p')
+    for so in $(find "${LIBC_DIR}" -name 'libnss_compat*'); do
+    			copy_exec "${so}"
+    done
+
+    keyTypes="rsa dss"
+    genConf="${tmpDir}/encryptrootfs.conf"
+    installConf="/etc/encryptrootfs.conf"
+
+    #start writing the conf for initramfs include
+    printf "#!/bin/sh\n\n" > "$genConf"
+    echo "keyTypes='${keyTypes}'" >> "$genConf"
+    echo "dropbear_port='${dropbear_port}'" >> "$genConf"
+
+    #go over different encryption key types
+    for keyType in $keyTypes; do
+      dropbearKey="${tmpDir}/${keyType}.dropbear"
+      installKey="/etc/dropbear/dropbear_${keyType}_host_key"
+
+      dropbearkey -t "$keyType" -f "$dropbearKey"
+      mkdir -p "${DESTDIR}/etc/dropbear"
+      cp "$dropbearKey" "${DESTDIR}/$installKey"
+
+      echo "dropbear_${keyType}_fingerprint='$keyFingerprint'" >> "$genConf"
+      echo "dropbear_${keyType}_bubble='$keyBubble'" >> "$genConf"
+    done
+
+    {
+        echo "encrypted_keyfile_path='${encrypted_keyfile_path}'"
+        echo "decrypted_keyfile_path='${decrypted_keyfile_path}'"
+        echo "boot_partition_size='${boot_partition_size}'"
+        echo "disk='${disk}'"
+        echo "root_partition='${root_partition}'"
+        echo "boot_partition_file_system='${boot_partition_file_system}'"
+        echo "rootfs_partition_file_system='${rootfs_partition_file_system}'"
+        echo "boot_partition_label='${boot_partition_label}'"
+        echo "pause_on_error='${pause_on_error}'"
+    } >> "$genConf"
+    cp "$genConf" "${DESTDIR}/$installConf"
+}
+
+networking_setup(){
+  copy_exec "$INSTALL_PATH/dhclient-script.sh" "/bin/dhclient-script.sh"
+  #Installing custom networking configuration
+  log "Installing network implementation $networking_configuration_implementation  as ${DESTDIR}/bin/encryptrootfs_network_impl.sh"
+  if [ ! -f "$networking_configuration_implementation" ]; then
+      fatal "Network configuration implementation file not foud $networking_configuration_implementation"
+  fi
+  cp "$networking_configuration_implementation" "${DESTDIR}/bin/encryptrootfs_network_impl.sh"
+  chmod 700 "${DESTDIR}/bin/encryptrootfs_network_impl.sh"
+
+  #TODO: refactor it to be more flexible for paths
+  log "Adding network dependencies for DNS working"
+  #for dig and nslookup
+  copy_exec "/usr/lib/x86_64-linux-gnu/openssl-1.0.0/engines/libgost.so"
+  #for nc
+  for i in $(ls /lib/x86_64-linux-gnu/libnss_dns.so.* 2>/dev/null); do
+    copy_exec "$i"
+  done
+
+  log "Installing network configuration dependencies $networking_configuration_dependencies"
+  install_dependencies "$networking_configuration_dependencies"
+}
+
+key_management(){
+    #installing actual keymanagement implementation
+    log "Installing key management implementation $key_management_implementation"
+    impl_path=$(lookup_implementation "$key_management_implementation" "$INSTALL_PATH")
+    log "Key management implementation ${impl_path} is used"
+    . "$impl_path"
+    log "Copying $impl_path to ${DESTDIR}/sbin/encryptrootfs_key_management_impl.sh"
+    cp "$impl_path" "${DESTDIR}/sbin/encryptrootfs_key_management_impl.sh"
+    chmod 700 "${DESTDIR}/sbin/encryptrootfs_key_management_impl.sh"
+
+    key_management_deps=$(key_management_dependencies)
+    log "Installing key management configuration dependencies '${key_management_deps}'"
+    install_dependencies "$key_management_deps"
+}
+
+case $1 in
+   prereqs)
+      prereqs
+      exit 0
+   ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+#sourcing config file
+. "${CONFDIR}/conf.d/encryptrootfs.conf"
+
+#some initialization and validation
+[ -z "${dropbear_port}" ] && dropbear_port=2222
+[ -z "${dropbear_acl}" ] && dropbear_acl=""
+[ -z "${encrypted_keyfile_path}" ] && encrypted_keyfile_path="luks.key"
+[ -z "${decrypted_keyfile_path}" ] && decrypted_keyfile_path="/tmp/keyfile.key"
+[ -z "${boot_partition_size}" ] && boot_partition_size="200"
+[ -z "${boot_partition_file_system}" ] && boot_partition_file_system="ext3"
+[ -z "${rootfs_partition_file_system}" ] && rootfs_partition_file_system="ext3"
+[ -z "${boot_partition_label}" ] && boot_partition_label="boot"
+[ -z "${key_management_implementation}" ] && key_management_implementation="naive_keymanagement.sh"
+[ -z "${pause_on_error}" ] && pause_on_error=10
+[ -z "${install_debug_deps}" ] && install_debug_deps="false"
+[ -z "${debug_deps}" ] && debug_deps=""
+
+#list of modules needed for core logic itself
+MODULE_DEPENDENCIES="parted sfdisk awk grep fdisk parted mkfs.${boot_partition_file_system}\
+  mkfs.${rootfs_partition_file_system} e2label /sbin/blkid insmod \
+  /sbin/cryptsetup \
+  /usr/sbin/dropbear"
+
+if [ -z "${networking_configuration_implementation}" ];then
+  fatal "'networking_configuration_implementation' parameter should be defined in config."
+fi
+
+if [ -z "${disk}" ];then
+  fatal "'disk' parameter should be defined in config."
+fi
+
+if [ -z "${root_partition}" ];then
+  fatal "'root_partition' parameter should be defined in config."
+fi
+
+log "Installing module dependencies '$MODULE_DEPENDENCIES'"
+install_dependencies "$MODULE_DEPENDENCIES"
+install_kernel_modules
+
+generate_config
+networking_setup
+key_management
+
+
+if [ "$install_debug_deps" = "true" ]
+then
+    log "Installing debug dependencies"
+    install_dependencies "$debug_deps"
+fi
+exit 0
