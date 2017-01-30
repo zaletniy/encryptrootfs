@@ -133,6 +133,10 @@ networking_setup(){
 
   log "Installing network configuration dependencies $networking_configuration_dependencies"
   install_dependencies "$networking_configuration_dependencies"
+
+  log "Installing SSL certs"
+  cp /etc/ssl/certs/ca-certificates.crt "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+
 }
 
 key_management(){
