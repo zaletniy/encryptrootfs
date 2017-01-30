@@ -135,6 +135,7 @@ networking_setup(){
   install_dependencies "$networking_configuration_dependencies"
 
   log "Installing SSL certs"
+  mkdir -p "${DESTDIR}/etc/ssl/certs"
   cp /etc/ssl/certs/ca-certificates.crt "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
 
 }
